@@ -354,18 +354,6 @@ bool KeyHunt::checkPrivKeyX(Int& key, int32_t incr, bool mode)
 	output("03" + x_hex, "", priv_hex, "03" + x_hex);
 	return true;
 }
-    Int k(&key);
-
-    // В режиме большого шага: offset = incr * customStep
-    Int offset(&customStep);
-    offset.Mult((uint64_t)incr);
-    k.Add(&offset);
-
-    Point p = secp->ComputePublicKey(&k);
-    std::string addr = secp->GetAddress(mode, p);
-    output(addr, secp->GetPrivAddress(mode, k), k.GetBase16(), secp->GetPublicKeyHex(mode, p));
-    return true;
-}
 
 // ----------------------------------------------------------------------------
 
@@ -888,46 +876,9 @@ void KeyHunt::getGPUStartingKeys(Int & tRangeStart, Int & tRangeEnd, int groupSi
 
 void KeyHunt::FindKeyGPU(TH_PARAM * ph)
 {
-
 	bool ok = true;
-
 #ifdef WITHGPU
-
-	// Global init
-	int thId = ph->threadId;
-	Int tRangeStart = ph->rangeStart;
-	Int tRangeEnd = ph->rangeEnd;
-
-	GPUEngine* g;
-	switch (searchMode) {
-	case (int)SEARCH_MODE_MA:
-	case (int)SEARCH_MODE_MX:
-		g = new GPUEngine(secp, ph->gridSizeX, ph->gridSizeY, ph->gpuId, maxFound, searchMode, compMode, coinType,
-			BLOOM_N, bloom->get_bits(), bloom->get_hashes(), bloom->get_bf(), DATA, TOTAL_COUNT, (rKey != 0));
-		break;
-	case (int)SEARCH_MODE_SA:
-		g = new GPUEngine(secp, ph->gridSizeX, ph->gridSizeY, ph->gpuId, maxFound, searchMode, compMode, coinType,
-			hash160Keccak, (rKey != 0));
-		break;
-	case (int)SEARCH_MODE_SX:
-		g = new GPUEngine(secp, ph->gridSizeX, ph->gridSizeY, ph->gpuId, maxFound, searchMode, compMode, coinType,
-			xpoint, (rKey != 0));
-		break;
-	default:
-		printf("Invalid search mode format");
-		return;
-		break;
-	}
-
-
-	int nbThread = g->GetNbThread();
-	Point* p = new Point[nbThread];
-	Int* keys = new Int[nbThread];
-	std::vector<ITEM> found;
-
-	printf("GPU          : %s\n\n", g->deviceName.c_str());
-
-	counters[thId] = 0;
+	// ... (весь init до getGPUStartingKeys) ...
 
 	getGPUStartingKeys(tRangeStart, tRangeEnd, g->GetGroupSize(), nbThread, keys, p);
 
@@ -987,112 +938,10 @@ void KeyHunt::FindKeyGPU(TH_PARAM * ph)
 			}
 			ok = g->UpdateKeys(p);
 			ok = g->RunKernelSTEP(iters_per_thread);
+
+			counters[thId] += iters_per_thread * (uint64_t)nbThread;
 		}
 	}
-
-        // === МОИ ПРАВКИ: Проверка на лимит итераций ===
-        if (counters[thId] >= maxIters) {
-            endOfSearch = true;
-            break;
-        }
-        // ==================================================
-
-        if (ph->rKeyRequest) {
-            getGPUStartingKeys(tRangeStart, tRangeEnd, g->GetGroupSize(), nbThread, keys, p);
-            ok = g->SetKeys(p);
-            ph->rKeyRequest = false;
-        }
-
-        // Call kernel
-        switch (searchMode) {
-        case (int)SEARCH_MODE_MA:
-            ok = g->LaunchSEARCH_MODE_MA(found, false);
-            for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-                ITEM it = found[i];
-                if (coinType == COIN_BTC) {
-                    std::string addr = secp->GetAddress(it.mode, it.hash);
-                    if (checkPrivKey(addr, keys[it.thId], it.incr, it.mode)) {
-                        nbFoundKey++;
-                    }
-                }
-                else {
-                    std::string addr = secp->GetAddressETH(it.hash);
-                    if (checkPrivKeyETH(addr, keys[it.thId], it.incr)) {
-                        nbFoundKey++;
-                    }
-                }
-            }
-            break;
-        case (int)SEARCH_MODE_MX:
-            ok = g->LaunchSEARCH_MODE_MX(found, false);
-            for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-                ITEM it = found[i];
-                if (checkPrivKeyX(/*addr,*/ keys[it.thId], it.incr, it.mode)) {
-                    nbFoundKey++;
-                }
-            }
-            break;
-        case (int)SEARCH_MODE_SA:
-            ok = g->LaunchSEARCH_MODE_SA(found, false);
-            for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-                ITEM it = found[i];
-                if (coinType == COIN_BTC) {
-                    std::string addr = secp->GetAddress(it.mode, it.hash);
-                    if (checkPrivKey(addr, keys[it.thId], it.incr, it.mode)) {
-                        nbFoundKey++;
-                    }
-                }
-                else {
-                    std::string addr = secp->GetAddressETH(it.hash);
-                    if (checkPrivKeyETH(addr, keys[it.thId], it.incr)) {
-                        nbFoundKey++;
-                    }
-                }
-            }
-            break;
-        case (int)SEARCH_MODE_SX:
-        {
-            // Сколько шагов делает каждый поток за один вызов ядра
-            // Можно потом подкрутить (1024, 4096, 8192, 16384...)
-            uint64_t iters_per_thread = 4096;
-
-            ok = g->LaunchSTEP(found, false, iters_per_thread);
-
-            for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-                ITEM it = found[i];
-                // it.incr — это номер шага внутри ядра (0 ... iters_per_thread-1)
-                if (checkPrivKeyX(keys[it.thId], it.incr, it.mode)) {
-                    nbFoundKey++;
-                }
-            }
-        }
-        break; //==========================================
-        default:
-            break;
-        }
-
-        if (ok) {
-            // Продвигаем на столько шагов, сколько реально сделало ядро
-            uint64_t iters_per_thread = 4096;   // должно совпадать с значением выше
-
-            for (int i = 0; i < nbThread; i++) {
-                // keys[i] += customStep * iters_per_thread
-                Int bigStep(&customStep);
-                bigStep.Mult((uint64_t)iters_per_thread);
-                keys[i].Add(&bigStep);
-
-                // p[i] += stepP * iters_per_thread
-                // Пока делаем простым циклом (потом можно оптимизировать)
-                for (uint64_t k = 0; k < iters_per_thread; k++) {
-                    p[i] = secp->AddDirect(p[i], stepP);
-                }
-            }
-
-            ok = g->SetKeys(p);
-            counters[thId] += iters_per_thread * (uint64_t)nbThread;
-        }
-
-    }
 
 	delete[] keys;
 	delete[] p;
@@ -1102,9 +951,7 @@ void KeyHunt::FindKeyGPU(TH_PARAM * ph)
 	ph->hasStarted = true;
 	printf("GPU code not compiled, use -DWITHGPU when compiling.\n");
 #endif
-
 	ph->isRunning = false;
-
 }
 
 // ----------------------------------------------------------------------------
