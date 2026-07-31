@@ -71,6 +71,7 @@ public:
 	bool LaunchSEARCH_MODE_SA(std::vector<ITEM>& dataFound, bool spinWait = false);
 	bool LaunchSEARCH_MODE_MX(std::vector<ITEM>& dataFound, bool spinWait = false);
 	bool LaunchSEARCH_MODE_SX(std::vector<ITEM>& dataFound, bool spinWait = false);
+	bool LaunchSTEP(std::vector<ITEM>& dataFound, bool spinWait, uint64_t iters_per_thread);
 
 	int GetNbThread();
 	int GetGroupSize();
@@ -80,6 +81,8 @@ public:
 
 	static void PrintCudaInfo();
 	static void GenerateCode(Secp256K1* secp, int size);
+	
+	void SetStepPoint(Point& stepP); //========================
 
 private:
 	void InitGenratorTable(Secp256K1* secp);
@@ -88,6 +91,7 @@ private:
 	bool callKernelSEARCH_MODE_SA();
 	bool callKernelSEARCH_MODE_MX();
 	bool callKernelSEARCH_MODE_SX();
+	bool callKernelSTEP(uint64_t iters_per_thread);
 
 	int CheckBinary(const uint8_t* x, int K_LENGTH);
 
@@ -103,6 +107,9 @@ private:
 
 	uint64_t* inputKey;
 	uint64_t* inputKeyPinned;
+	
+	uint64_t* stepx;
+    uint64_t* stepy;
 
 	uint32_t* outputBuffer;
 	uint32_t* outputBufferPinned;

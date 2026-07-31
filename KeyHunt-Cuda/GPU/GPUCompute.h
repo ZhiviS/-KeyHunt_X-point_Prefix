@@ -1190,3 +1190,115 @@ __device__ void ComputeKeysSEARCH_ETH_MODE_SA(uint64_t* startx, uint64_t* starty
 }
 
 
+// =============================================================================
+// НОВЫЙ РЕЖИМ: Sequential Step (фиксированный большой шаг)
+// Использует существующую MatchXPoint с префиксом 61DB9B9F
+// =============================================================================
+
+__device__ __noinline__ void CheckPointSTEP(uint64_t* px, int32_t incr,
+    uint32_t maxFound, uint32_t* out)
+{
+    // Готовим X в том же формате, что и в CheckPubCompSEARCH_MODE_SX
+    uint32_t h[8];
+    uint32_t* x32 = (uint32_t*)(px);
+
+    h[0] = __byte_perm(x32[7], 0, 0x0123);
+    h[1] = __byte_perm(x32[6], 0, 0x0123);
+    h[2] = __byte_perm(x32[5], 0, 0x0123);
+    h[3] = __byte_perm(x32[4], 0, 0x0123);
+    h[4] = __byte_perm(x32[3], 0, 0x0123);
+    h[5] = __byte_perm(x32[2], 0, 0x0123);
+    h[6] = __byte_perm(x32[1], 0, 0x0123);
+    h[7] = __byte_perm(x32[0], 0, 0x0123);
+
+    // Используем существующую функцию с префиксом 61DB9B9F
+    if (MatchXPoint(h, NULL)) {
+        uint32_t tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+        uint32_t pos = atomicAdd(out, 1);
+        if (pos < maxFound) {
+            out[pos * ITEM_SIZE_X32 + 1] = tid;
+            out[pos * ITEM_SIZE_X32 + 2] = (uint32_t)(incr << 16) | (uint32_t)(1 << 15);
+            out[pos * ITEM_SIZE_X32 + 3] = h[0];
+            out[pos * ITEM_SIZE_X32 + 4] = h[1];
+            out[pos * ITEM_SIZE_X32 + 5] = h[2];
+            out[pos * ITEM_SIZE_X32 + 6] = h[3];
+            out[pos * ITEM_SIZE_X32 + 7] = h[4];
+            out[pos * ITEM_SIZE_X32 + 8] = h[5];
+            out[pos * ITEM_SIZE_X32 + 9] = h[6];
+            out[pos * ITEM_SIZE_X32 + 10] = h[7];
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Полное сложение точки: P = P + Step
+// -----------------------------------------------------------------------------
+__device__ void PointAddFull(uint64_t* px, uint64_t* py,
+                            const uint64_t* qx, const uint64_t* qy)
+{
+    uint64_t dx[4], dy[4], s[4], s2[4];
+    uint64_t inv[5];
+    uint64_t rx[4], ry[4];
+    uint64_t tmp[4];
+
+    // dx = qx - px
+    ModSub256(dx, (uint64_t*)qx, px);
+
+    // dy = qy - py
+    ModSub256(dy, (uint64_t*)qy, py);
+
+    // inv = 1 / dx
+    inv[0] = dx[0];
+    inv[1] = dx[1];
+    inv[2] = dx[2];
+    inv[3] = dx[3];
+    inv[4] = 0;
+    _ModInv(inv);
+
+    // s = dy * inv
+    _ModMult(s, dy, inv);
+
+    // s2 = s²
+    _ModSqr(s2, s);
+
+    // rx = s² - px - qx
+    ModSub256(rx, s2, px);
+    ModSub256(rx, (uint64_t*)qx);
+
+    // tmp = px - rx
+    ModSub256(tmp, px, rx);
+
+    // ry = s * tmp - py
+    _ModMult(ry, s, tmp);
+    ModSub256(ry, py);
+
+    // Записываем результат обратно
+    px[0] = rx[0]; px[1] = rx[1]; px[2] = rx[2]; px[3] = rx[3];
+    py[0] = ry[0]; py[1] = ry[1]; py[2] = ry[2]; py[3] = ry[3];
+}
+
+// -----------------------------------------------------------------------------
+// Ядро Sequential Step
+// -----------------------------------------------------------------------------
+__device__ void ComputeKeysSTEP(uint64_t* startx, uint64_t* starty,
+                               const uint64_t* stepx, const uint64_t* stepy,
+                               uint64_t iters_per_thread,
+                               uint32_t maxFound, uint32_t* out)
+{
+    uint64_t px[4];
+    uint64_t py[4];
+
+    // Загружаем стартовую точку потока
+    Load256(px, startx);
+    Load256(py, starty);
+
+    for (uint64_t i = 0; i < iters_per_thread; i++) {
+        // Проверяем текущую точку
+        CheckPointSTEP(px, (int32_t)i, maxFound, out);
+
+        // P = P + stepP
+        PointAddFull(px, py, stepx, stepy);
+    }
+}
+
+

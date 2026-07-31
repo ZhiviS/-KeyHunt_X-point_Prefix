@@ -118,14 +118,25 @@ __global__ void compute_keys_mode_eth_ma(uint8_t* bloomLookUp, int BLOOM_BITS, u
 	ComputeKeysSEARCH_ETH_MODE_MA(keys + xPtr, keys + yPtr, bloomLookUp, BLOOM_BITS, BLOOM_HASHES, maxFound, found);
 
 }
-
+//======================Изменили==============================================================
 __global__ void compute_keys_mode_eth_sa(uint32_t* hash, uint64_t* keys, uint32_t maxFound, uint32_t* found)
 {
+    int xPtr = (blockIdx.x * blockDim.x) * 8;
+    int yPtr = xPtr + 4 * blockDim.x;
+    ComputeKeysSEARCH_ETH_MODE_SA(keys + xPtr, keys + yPtr, hash, maxFound, found);
+}
 
-	int xPtr = (blockIdx.x * blockDim.x) * 8;
-	int yPtr = xPtr + 4 * blockDim.x;
-	ComputeKeysSEARCH_ETH_MODE_SA(keys + xPtr, keys + yPtr, hash, maxFound, found);
-
+// =============================================================================
+// НОВЫЙ РЕЖИМ: Sequential Step
+// =============================================================================
+__global__ void compute_keys_step(uint64_t* keys, 
+                                  const uint64_t* stepx, const uint64_t* stepy,
+                                  uint64_t iters_per_thread,
+                                  uint32_t maxFound, uint32_t* found)
+{
+    int xPtr = (blockIdx.x * blockDim.x) * 8;
+    int yPtr = xPtr + 4 * blockDim.x;
+    ComputeKeysSTEP(keys + xPtr, keys + yPtr, stepx, stepy, iters_per_thread, maxFound, found);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -240,6 +251,10 @@ GPUEngine::GPUEngine(Secp256K1* secp, int nbThreadGroup, int nbThreadPerGroup, i
 	// Allocate memory
 	CudaSafeCall(cudaMalloc((void**)&inputKey, nbThread * 32 * 2));
 	CudaSafeCall(cudaHostAlloc(&inputKeyPinned, nbThread * 32 * 2, cudaHostAllocWriteCombined | cudaHostAllocMapped));
+	
+	// Память под точку шага (step * G)====================================
+    CudaSafeCall(cudaMalloc((void**)&stepx, 4 * sizeof(uint64_t)));
+    CudaSafeCall(cudaMalloc((void**)&stepy, 4 * sizeof(uint64_t)));
 
 	CudaSafeCall(cudaMalloc((void**)&outputBuffer, outputSize));
 	CudaSafeCall(cudaHostAlloc(&outputBufferPinned, outputSize, cudaHostAllocWriteCombined | cudaHostAllocMapped));
@@ -319,6 +334,10 @@ GPUEngine::GPUEngine(Secp256K1* secp, int nbThreadGroup, int nbThreadPerGroup, i
 	// Allocate memory
 	CudaSafeCall(cudaMalloc((void**)&inputKey, nbThread * 32 * 2));
 	CudaSafeCall(cudaHostAlloc(&inputKeyPinned, nbThread * 32 * 2, cudaHostAllocWriteCombined | cudaHostAllocMapped));
+	
+	// Память под точку шага (step * G)=======================================
+    CudaSafeCall(cudaMalloc((void**)&stepx, 4 * sizeof(uint64_t)));
+    CudaSafeCall(cudaMalloc((void**)&stepy, 4 * sizeof(uint64_t)));
 
 	CudaSafeCall(cudaMalloc((void**)&outputBuffer, outputSize));
 	CudaSafeCall(cudaHostAlloc(&outputBufferPinned, outputSize, cudaHostAllocWriteCombined | cudaHostAllocMapped));
@@ -482,6 +501,9 @@ GPUEngine::~GPUEngine()
 	CudaSafeCall(cudaFree(__2Gny));
 	CudaSafeCall(cudaFree(_Gx));
 	CudaSafeCall(cudaFree(_Gy));
+	
+	CudaSafeCall(cudaFree(stepx)); //========================
+    CudaSafeCall(cudaFree(stepy)); //========================
 
 	if (rKey)
 		CudaSafeCall(cudaFreeHost(inputKeyPinned));
@@ -613,6 +635,24 @@ bool GPUEngine::callKernelSEARCH_MODE_SX()
 }
 
 // ----------------------------------------------------------------------------
+bool GPUEngine::callKernelSTEP(uint64_t iters_per_thread)
+{
+    // Reset nbFound
+    CudaSafeCall(cudaMemset(outputBuffer, 0, 4));
+
+    // Запуск нового ядра
+    compute_keys_step <<< nbThread / nbThreadPerGroup, nbThreadPerGroup >>>
+        (inputKey, stepx, stepy, iters_per_thread, maxFound, outputBuffer);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("GPUEngine: Kernel STEP: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------
 
 bool GPUEngine::SetKeys(Point* p)
 {
@@ -661,6 +701,16 @@ bool GPUEngine::SetKeys(Point* p)
 		return false;
 		break;
 	}
+}
+
+// ----------------------------Добавление кода------------------------------------------------
+void GPUEngine::SetStepPoint(Point& stepP)
+{
+    uint64_t px[4] = { stepP.x.bits64[0], stepP.x.bits64[1], stepP.x.bits64[2], stepP.x.bits64[3] };
+    uint64_t py[4] = { stepP.y.bits64[0], stepP.y.bits64[1], stepP.y.bits64[2], stepP.y.bits64[3] };
+
+    CudaSafeCall(cudaMemcpy(stepx, px, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice));
+    CudaSafeCall(cudaMemcpy(stepy, py, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice));
 }
 
 // ----------------------------------------------------------------------------
@@ -866,6 +916,51 @@ bool GPUEngine::LaunchSEARCH_MODE_SX(std::vector<ITEM>& dataFound, bool spinWait
 }
 
 // ----------------------------------------------------------------------------
+bool GPUEngine::LaunchSTEP(std::vector<ITEM>& dataFound, bool spinWait, uint64_t iters_per_thread)
+{
+    dataFound.clear();
+
+    // Get the result
+    if (spinWait) {
+        CudaSafeCall(cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost));
+    }
+    else {
+        // Use cudaMemcpyAsync to avoid default spin wait of cudaMemcpy which takes 100% CPU
+        cudaEvent_t evt;
+        CudaSafeCall(cudaEventCreate(&evt));
+        CudaSafeCall(cudaMemcpyAsync(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost, 0));
+        CudaSafeCall(cudaEventRecord(evt, 0));
+        while (cudaEventQuery(evt) == cudaErrorNotReady) {
+            // Sleep 1 ms to free the CPU
+            Timer::SleepMillis(1);
+        }
+        CudaSafeCall(cudaEventDestroy(evt));
+    }
+
+    // Look for data found
+    uint32_t nbFound = outputBufferPinned[0];
+    if (nbFound > maxFound) {
+        nbFound = maxFound;
+    }
+
+    // When can perform a standard copy, the kernel is ended
+    CudaSafeCall(cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE_X + 4, cudaMemcpyDeviceToHost));
+
+    for (uint32_t i = 0; i < nbFound; i++) {
+        uint32_t* itemPtr = outputBufferPinned + (i * ITEM_SIZE_X32 + 1);
+        ITEM it;
+        it.thId = itemPtr[0];
+        int16_t* ptr = (int16_t*)&(itemPtr[1]);
+        it.mode = (ptr[0] & 0x8000) != 0;
+        it.incr = ptr[1];
+        it.hash = (uint8_t*)(itemPtr + 2);
+        dataFound.push_back(it);
+    }
+
+    return callKernelSTEP(iters_per_thread);
+}
+
+// ----------------------------------------------------------------------------
 
 int GPUEngine::CheckBinary(const uint8_t* _x, int K_LENGTH)
 {
@@ -896,7 +991,3 @@ int GPUEngine::CheckBinary(const uint8_t* _x, int K_LENGTH)
 	}
 	return r;
 }
-
-
-
-
