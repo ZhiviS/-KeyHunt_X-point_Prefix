@@ -22,7 +22,7 @@ Point _2Gn;
 
 // === МОИ ПРАВКИ: Глобальные переменные для шага ===
 static Int customStep;
-static uint64_t maxIters = 30000000000000ULL; // 10 триллиона итераций
+static uint64_t maxIters = 7000000000000ULL; // 10 триллиона итераций
 // ===================================================
 
 KeyHunt::KeyHunt(const std::string& inputFile, int compMode, int searchMode, int coinType, bool useGpu,
@@ -47,7 +47,7 @@ KeyHunt::KeyHunt(const std::string& inputFile, int compMode, int searchMode, int
 
 	// === МОИ ПРАВКИ: Отключаем рандом и ставим наш шаг (для режима multiple addresses/xpoints) ===
 	this->rKey = 0;
-	customStep.SetBase16("12c3d6f030fa5be"); // ВАШ ШАГ БЕЗ 0x В НАЧАЛЕ И ещё, строка 160!!!
+	customStep.SetBase16("a0d7c49d1199d"); // ВАШ ШАГ БЕЗ 0x В НАЧАЛЕ И ещё, строка 160!!!
 	// =========================================================================================
 
 	secp = new Secp256K1();
@@ -157,7 +157,7 @@ KeyHunt::KeyHunt(const std::vector<unsigned char>& hashORxpoint, int compMode, i
 	
 	    // === МОИ ПРАВКИ: Отключаем рандом и ставим наш шаг ===
     this->rKey = 0; 
-    customStep.SetBase16("12c3d6f030fa5be"); // ВАШ ШАГ БЕЗ 0x В НАЧАЛЕ!
+    customStep.SetBase16("a0d7c49d1199d"); // ВАШ ШАГ БЕЗ 0x В НАЧАЛЕ!
     // =======================================================
 
 	secp = new Secp256K1();
@@ -341,12 +341,17 @@ bool KeyHunt::checkPrivKeyETH(std::string addr, Int& key, int32_t incr)
 
 bool KeyHunt::checkPrivKeyX(Int& key, int32_t incr, bool mode)
 {
-	Int k(&key);
-	k.Add((uint64_t)incr);
-	Point p = secp->ComputePublicKey(&k);
-	std::string addr = secp->GetAddress(mode, p);
-	output(addr, secp->GetPrivAddress(mode, k), k.GetBase16(), secp->GetPublicKeyHex(mode, p));
-	return true;
+    Int k(&key);
+
+    // В режиме большого шага: offset = incr * customStep
+    Int offset(&customStep);
+    offset.Mult((uint64_t)incr);
+    k.Add(&offset);
+
+    Point p = secp->ComputePublicKey(&k);
+    std::string addr = secp->GetAddress(mode, p);
+    output(addr, secp->GetPrivAddress(mode, k), k.GetBase16(), secp->GetPublicKeyHex(mode, p));
+    return true;
 }
 
 // ----------------------------------------------------------------------------
@@ -920,7 +925,10 @@ void KeyHunt::FindKeyGPU(TH_PARAM * ph)
     // === МОИ ПРАВКИ: Предвычисляем шаг на эллиптической кривой ===
     // customStep * G — это на сколько сдвинуть стартовую точку p[i]
     Point stepP = secp->ComputePublicKey(&customStep);
-    // ================================================================
+    
+	// Загружаем точку шага на GPU
+    g->SetStepPoint(stepP);
+	// ================================================================
 
     // GPU Thread ++++
     while (ok && !endOfSearch) {
@@ -986,32 +994,45 @@ void KeyHunt::FindKeyGPU(TH_PARAM * ph)
             }
             break;
         case (int)SEARCH_MODE_SX:
-            ok = g->LaunchSEARCH_MODE_SX(found, false);
+        {
+            // Сколько шагов делает каждый поток за один вызов ядра
+            // Можно потом подкрутить (1024, 4096, 8192, 16384...)
+            uint64_t iters_per_thread = 4096;
+
+            ok = g->LaunchSTEP(found, false, iters_per_thread);
+
             for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
                 ITEM it = found[i];
-                if (checkPrivKeyX(/*addr,*/ keys[it.thId], it.incr, it.mode)) {
+                // it.incr — это номер шага внутри ядра (0 ... iters_per_thread-1)
+                if (checkPrivKeyX(keys[it.thId], it.incr, it.mode)) {
                     nbFoundKey++;
                 }
             }
-            break;
+        }
+        break; //==========================================
         default:
             break;
         }
 
         if (ok) {
+            // Продвигаем на столько шагов, сколько реально сделало ядро
+            uint64_t iters_per_thread = 4096;   // должно совпадать с значением выше
+
             for (int i = 0; i < nbThread; i++) {
-                // === МОИ ПРАВКИ: Применяем наш огромный шаг ===
-                keys[i].Add(&customStep);
-                // === ИСПРАВЛЕНИЕ: Обновляем стартовую точку p[i] ===
-                // p[i] должен соответствовать (keys[i] + groupSize/2) * G
-                // Быстрее добавить stepP к текущей p[i], чем пересчитывать с нуля
-                p[i] = secp->AddDirect(p[i], stepP);
-                // ==================================================
+                // keys[i] += customStep * iters_per_thread
+                Int bigStep(&customStep);
+                bigStep.Mult((uint64_t)iters_per_thread);
+                keys[i].Add(&bigStep);
+
+                // p[i] += stepP * iters_per_thread
+                // Пока делаем простым циклом (потом можно оптимизировать)
+                for (uint64_t k = 0; k < iters_per_thread; k++) {
+                    p[i] = secp->AddDirect(p[i], stepP);
+                }
             }
-            // === ИСПРАВЛЕНИЕ: Передаём обновлённые точки на GPU ===
+
             ok = g->SetKeys(p);
-            // =====================================================
-            counters[thId] += (uint64_t)(STEP_SIZE)*nbThread; // Point
+            counters[thId] += iters_per_thread * (uint64_t)nbThread;
         }
 
     }
