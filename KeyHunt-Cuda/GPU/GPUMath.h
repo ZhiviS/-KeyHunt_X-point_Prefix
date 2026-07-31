@@ -314,26 +314,30 @@ __device__ void ModNeg256(uint64_t *r)
 }
 
 // ---------------------------------------------------------------------------------------
-
-__device__ void ModSub256(uint64_t *r, uint64_t *a, uint64_t *b)
+__device__ void ModAdd256(uint64_t *r, uint64_t *a, uint64_t *b)
 {
+    uint64_t t[4];
+    uint64_t carry;
+    UADDO(t[0], a[0], b[0]);
+    UADDC(t[1], a[1], b[1]);
+    UADDC(t[2], a[2], b[2]);
+    UADDC(t[3], a[3], b[3]);
+    UADD(carry, 0ULL, 0ULL);
 
-    uint64_t t;
-    uint64_t T[4];
-    USUBO(r[0], a[0], b[0]);
-    USUBC(r[1], a[1], b[1]);
-    USUBC(r[2], a[2], b[2]);
-    USUBC(r[3], a[3], b[3]);
-    USUB(t, 0ULL, 0ULL);
-    T[0] = 0xFFFFFFFEFFFFFC2FULL & t;
-    T[1] = 0xFFFFFFFFFFFFFFFFULL & t;
-    T[2] = 0xFFFFFFFFFFFFFFFFULL & t;
-    T[3] = 0xFFFFFFFFFFFFFFFFULL & t;
-    UADDO1(r[0], T[0]);
-    UADDC1(r[1], T[1]);
-    UADDC1(r[2], T[2]);
-    UADD1(r[3], T[3]);
+    // t = t - P (если t >= P или был carry)
+    uint64_t s[4];
+    uint64_t borrow;
+    USUBO(s[0], t[0], 0xFFFFFFFEFFFFFC2FULL);
+    USUBC(s[1], t[1], 0xFFFFFFFFFFFFFFFFULL);
+    USUBC(s[2], t[2], 0xFFFFFFFFFFFFFFFFULL);
+    USUBC(s[3], t[3], 0xFFFFFFFFFFFFFFFFULL);
+    USUB(borrow, carry, 0ULL);
 
+    if (!borrow) {
+        r[0] = s[0]; r[1] = s[1]; r[2] = s[2]; r[3] = s[3];
+    } else {
+        r[0] = t[0]; r[1] = t[1]; r[2] = t[2]; r[3] = t[3];
+    }
 }
 
 // ---------------------------------------------------------------------------------------

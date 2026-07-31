@@ -83,6 +83,9 @@ public:
 	static void GenerateCode(Secp256K1* secp, int size);
 	
 	void SetStepPoint(Point& stepP); //========================
+	void SetTargetPrefix(const uint32_t* prefix);
+	bool UpdateKeys(Point* p);
+	bool RunKernelSTEP(uint64_t iters_per_thread);
 
 private:
 	void InitGenratorTable(Secp256K1* secp);

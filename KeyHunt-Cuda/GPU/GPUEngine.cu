@@ -712,7 +712,32 @@ void GPUEngine::SetStepPoint(Point& stepP)
     CudaSafeCall(cudaMemcpy(stepx, px, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice));
     CudaSafeCall(cudaMemcpy(stepy, py, 4 * sizeof(uint64_t), cudaMemcpyHostToDevice));
 }
+void GPUEngine::SetTargetPrefix(const uint32_t* prefix)
+{
+	CudaSafeCall(cudaMemcpyToSymbol(d_target_prefix, prefix, 4 * sizeof(uint32_t), 0, cudaMemcpyHostToDevice));
+}
+bool GPUEngine::UpdateKeys(Point* p)
+{
+	for (int i = 0; i < nbThread; i += nbThreadPerGroup) {
+		for (int j = 0; j < nbThreadPerGroup; j++) {
+			inputKeyPinned[8 * i + j + 0 * nbThreadPerGroup] = p[i + j].x.bits64[0];
+			inputKeyPinned[8 * i + j + 1 * nbThreadPerGroup] = p[i + j].x.bits64[1];
+			inputKeyPinned[8 * i + j + 2 * nbThreadPerGroup] = p[i + j].x.bits64[2];
+			inputKeyPinned[8 * i + j + 3 * nbThreadPerGroup] = p[i + j].x.bits64[3];
+			inputKeyPinned[8 * i + j + 4 * nbThreadPerGroup] = p[i + j].y.bits64[0];
+			inputKeyPinned[8 * i + j + 5 * nbThreadPerGroup] = p[i + j].y.bits64[1];
+			inputKeyPinned[8 * i + j + 6 * nbThreadPerGroup] = p[i + j].y.bits64[2];
+			inputKeyPinned[8 * i + j + 7 * nbThreadPerGroup] = p[i + j].y.bits64[3];
+		}
+	}
+	CudaSafeCall(cudaMemcpy(inputKey, inputKeyPinned, nbThread * 32 * 2, cudaMemcpyHostToDevice));
+	return true;
+}
 
+bool GPUEngine::RunKernelSTEP(uint64_t iters_per_thread)
+{
+	return callKernelSTEP(iters_per_thread);
+}
 // ----------------------------------------------------------------------------
 
 bool GPUEngine::LaunchSEARCH_MODE_MA(std::vector<ITEM>& dataFound, bool spinWait)
