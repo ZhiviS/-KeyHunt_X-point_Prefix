@@ -341,6 +341,19 @@ bool KeyHunt::checkPrivKeyETH(std::string addr, Int& key, int32_t incr)
 
 bool KeyHunt::checkPrivKeyX(Int& key, int32_t incr, bool mode)
 {
+	Int k(&key);
+	Int offset(&customStep);
+	offset.Mult((uint64_t)incr);
+	k.Add(&offset);
+
+	Point p = secp->ComputePublicKey(&k);
+	std::string x_hex = p.x.GetBase16();
+	std::string priv_hex = k.GetBase16();
+
+	output("02" + x_hex, "", priv_hex, "02" + x_hex);
+	output("03" + x_hex, "", priv_hex, "03" + x_hex);
+	return true;
+}
     Int k(&key);
 
     // В режиме большого шага: offset = incr * customStep
@@ -917,21 +930,65 @@ void KeyHunt::FindKeyGPU(TH_PARAM * ph)
 	counters[thId] = 0;
 
 	getGPUStartingKeys(tRangeStart, tRangeEnd, g->GetGroupSize(), nbThread, keys, p);
-	ok = g->SetKeys(p);
+
+	Point stepP = secp->ComputePublicKey(&customStep);
+	g->SetStepPoint(stepP);
+
+	uint32_t prefix_u32[4] = {0x9F9BDB61U, 0, 0, 0};
+	g->SetTargetPrefix(prefix_u32);
+
+	uint64_t iters_per_thread = 4096;
+
+	ok = g->UpdateKeys(p);
+	ok = g->RunKernelSTEP(iters_per_thread);
 
 	ph->hasStarted = true;
 	ph->rKeyRequest = false;
 
-    // === МОИ ПРАВКИ: Предвычисляем шаг на эллиптической кривой ===
-    // customStep * G — это на сколько сдвинуть стартовую точку p[i]
-    Point stepP = secp->ComputePublicKey(&customStep);
-    
-	// Загружаем точку шага на GPU
-    g->SetStepPoint(stepP);
-	// ================================================================
+	while (ok && !endOfSearch) {
 
-    // GPU Thread ++++
-    while (ok && !endOfSearch) {
+		if (counters[thId] >= maxIters) {
+			endOfSearch = true;
+			break;
+		}
+
+		if (ph->rKeyRequest) {
+			getGPUStartingKeys(tRangeStart, tRangeEnd, g->GetGroupSize(), nbThread, keys, p);
+			ok = g->UpdateKeys(p);
+			ok = g->RunKernelSTEP(iters_per_thread);
+			ph->rKeyRequest = false;
+		}
+
+		switch (searchMode) {
+		case (int)SEARCH_MODE_SX:
+		{
+			ok = g->LaunchSTEP(found, false, iters_per_thread);
+			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+				ITEM it = found[i];
+				if (checkPrivKeyX(keys[it.thId], it.incr, it.mode)) {
+					nbFoundKey++;
+				}
+			}
+		}
+		break;
+		default:
+			break;
+		}
+
+		if (ok) {
+			for (int i = 0; i < nbThread; i++) {
+				Int bigStep(&customStep);
+				bigStep.Mult((uint64_t)iters_per_thread);
+				keys[i].Add(&bigStep);
+
+				for (uint64_t k = 0; k < iters_per_thread; k++) {
+					p[i] = secp->AddDirect(p[i], stepP);
+				}
+			}
+			ok = g->UpdateKeys(p);
+			ok = g->RunKernelSTEP(iters_per_thread);
+		}
+	}
 
         // === МОИ ПРАВКИ: Проверка на лимит итераций ===
         if (counters[thId] >= maxIters) {
